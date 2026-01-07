@@ -42,7 +42,8 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     testImplementation 'io.projectreactor:reactor-test'
 
-    //스웨거
+    // Swagger/OpenAPI
+    implementation 'org.springdoc:springdoc-openapi-ui:1.6.15'
 
     // Dev
     developmentOnly 'org.springframework.boot:spring-boot-devtools'
@@ -59,13 +60,11 @@ dependencies {
     runtimeOnly 'com.h2database:h2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
-    // Lombok - FIXED
+    // Lombok
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
     testCompileOnly 'org.projectlombok:lombok'
     testAnnotationProcessor 'org.projectlombok:lombok'
-
-    implementation 'org.springdoc:springdoc-openapi-ui:1.6.15'
 
     //jackson-datatype-jsr310 의존성
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
