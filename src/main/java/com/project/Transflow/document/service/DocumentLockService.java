@@ -24,21 +24,49 @@ public class DocumentLockService {
     private final DocumentRepository documentRepository;
     private final UserRepository userRepository;
 
-    @Transactional
+    @Transactional(timeout = 30)
     public DocumentLock acquireLock(Long documentId, Long userId) {
+        log.info("🔒 락 획득 시도: documentId={}, userId={}", documentId, userId);
+        
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "문서를 찾을 수 없습니다."));
 
-        User user = userRepository.findById(userId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "사용자를 찾을 수 없습니다."));
+        // 개발 단계: userId가 null이거나 사용자를 찾지 못하면 기본 사용자 사용
+        User user;
+        if (userId != null) {
+            user = userRepository.findById(userId)
+                    .orElseGet(() -> {
+                        // 사용자를 찾지 못하면 기본 사용자 찾기
+                        log.warn("사용자 ID {}를 찾을 수 없어 기본 사용자를 사용합니다.", userId);
+                        return userRepository.findAll().stream()
+                                .filter(u -> u.getRoleLevel() <= 2) // 관리자 이상
+                                .findFirst()
+                                .orElseGet(() -> userRepository.findAll().stream()
+                                        .findFirst()
+                                        .orElseThrow(() -> new ResponseStatusException(
+                                                HttpStatus.INTERNAL_SERVER_ERROR,
+                                                "시스템에 사용자가 없습니다. 먼저 사용자를 생성해주세요.")));
+                    });
+        } else {
+            // userId가 null이면 기본 사용자 찾기
+            user = userRepository.findAll().stream()
+                    .filter(u -> u.getRoleLevel() <= 2) // 관리자 이상
+                    .findFirst()
+                    .orElseGet(() -> userRepository.findAll().stream()
+                            .findFirst()
+                            .orElseThrow(() -> new ResponseStatusException(
+                                    HttpStatus.INTERNAL_SERVER_ERROR,
+                                    "시스템에 사용자가 없습니다. 먼저 사용자를 생성해주세요.")));
+            log.warn("userId가 null이어서 기본 사용자 사용: {}", user.getId());
+        }
 
         // 이미 락이 있는지 확인
         Optional<DocumentLock> existingLock = lockRepository.findByDocumentId(documentId);
         if (existingLock.isPresent()) {
             DocumentLock lock = existingLock.get();
-            // 같은 사용자가 락을 가지고 있으면 그대로 반환
-            if (lock.getLockedBy().getId().equals(userId)) {
-                log.info("이미 같은 사용자가 락을 보유하고 있습니다: documentId={}, userId={}", documentId, userId);
+            // userId가 null이면 비교하지 않고 기존 락 반환 (개발 단계)
+            if (userId == null || lock.getLockedBy().getId().equals(user.getId())) {
+                log.info("✅ 이미 같은 사용자가 락을 보유하고 있습니다: documentId={}, userId={}", documentId, userId);
                 return lock;
             }
             // 다른 사용자가 락을 가지고 있으면 예외 발생
@@ -48,20 +76,60 @@ public class DocumentLockService {
             );
         }
 
-        // 새 락 생성
-        DocumentLock lock = DocumentLock.builder()
-                .document(document)
-                .lockedBy(user)
-                .build();
+        // 새 락 생성 시도
+        try {
+            DocumentLock lock = DocumentLock.builder()
+                    .document(document)
+                    .lockedBy(user)
+                    .build();
+            
+            // flush를 명시적으로 호출하여 즉시 DB에 반영
+            DocumentLock saved = lockRepository.saveAndFlush(lock);
+            log.info("✅ 문서 락 DB 저장 완료: documentId={}, userId={}, lockId={}", 
+                    documentId, userId, saved.getId());
 
-        DocumentLock saved = lockRepository.save(lock);
-        log.info("문서 락 획득: documentId={}, userId={}", documentId, userId);
+            // 문서 상태를 IN_TRANSLATION으로 변경
+            document.setStatus("IN_TRANSLATION");
+            documentRepository.saveAndFlush(document);
+            log.info("✅ 문서 상태 업데이트 완료: documentId={}, status=IN_TRANSLATION", documentId);
 
-        // 문서 상태를 IN_TRANSLATION으로 변경
-        document.setStatus("IN_TRANSLATION");
-        documentRepository.save(document);
-
-        return saved;
+            return saved;
+            
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            // 유니크 제약조건 위반 (다른 요청이 먼저 락을 생성함)
+            log.warn("⚠️ 유니크 제약조건 위반 (다른 요청이 먼저 락을 획득): documentId={}", documentId);
+            // 다시 조회하여 기존 락 반환
+            Optional<DocumentLock> newLock = lockRepository.findByDocumentId(documentId);
+            if (newLock.isPresent()) {
+                DocumentLock lock = newLock.get();
+                if (lock.getLockedBy().getId().equals(user.getId())) {
+                    log.info("✅ 재조회 후 같은 사용자의 락 발견: documentId={}", documentId);
+                    return lock;
+                } else {
+                    throw new ResponseStatusException(
+                            HttpStatus.CONFLICT,
+                            "이 문서는 다른 사용자가 작업 중입니다: " + lock.getLockedBy().getName()
+                    );
+                }
+            }
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "문서 락을 획득할 수 없습니다. 다른 사용자가 작업 중일 수 있습니다."
+            );
+        } catch (org.hibernate.exception.LockAcquisitionException | 
+                 org.springframework.dao.CannotAcquireLockException e) {
+            log.error("❌ DB 락 획득 실패: documentId={}, userId={}", documentId, userId, e);
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "문서 락을 획득하는 중 데이터베이스 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+            );
+        } catch (Exception e) {
+            log.error("❌ 락 저장 중 예상치 못한 오류: documentId={}, userId={}", documentId, userId, e);
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "문서 락을 저장하는 중 오류가 발생했습니다: " + e.getMessage()
+            );
+        }
     }
 
     @Transactional
@@ -73,7 +141,9 @@ public class DocumentLockService {
         }
 
         DocumentLock lock = lockOpt.get();
-        if (!lock.getLockedBy().getId().equals(userId)) {
+        
+        // userId가 null이면 락을 보유한 사용자와 비교하지 않고 해제 (개발 단계)
+        if (userId != null && !lock.getLockedBy().getId().equals(userId)) {
             throw new ResponseStatusException(
                     HttpStatus.FORBIDDEN,
                     "락을 해제할 권한이 없습니다."
@@ -92,7 +162,47 @@ public class DocumentLockService {
 
     @Transactional(readOnly = true)
     public Optional<DocumentLock> getLockStatus(Long documentId) {
-        return lockRepository.findByDocumentId(documentId);
+        try {
+            log.debug("🔍 락 상태 조회 시작: documentId={}", documentId);
+            
+            // LAZY 로딩 문제 해결을 위해 JOIN FETCH 사용
+            Optional<DocumentLock> lockOpt = lockRepository.findByDocumentIdWithUser(documentId);
+            
+            if (lockOpt.isPresent()) {
+                DocumentLock lock = lockOpt.get();
+                log.debug("✅ 락 발견: lockId={}, documentId={}", lock.getId(), documentId);
+                
+                // LAZY 로딩 강제 초기화 (트랜잭션 내에서)
+                try {
+                    if (lock.getLockedBy() != null) {
+                        Long lockedById = lock.getLockedBy().getId();
+                        String lockedByName = lock.getLockedBy().getName();
+                        String lockedByEmail = lock.getLockedBy().getEmail();
+                        log.debug("✅ lockedBy 정보 로드 완료: userId={}, name={}, email={}", 
+                                lockedById, lockedByName, lockedByEmail);
+                    } else {
+                        log.warn("⚠️ lockedBy가 null입니다: lockId={}", lock.getId());
+                    }
+                    
+                    if (lock.getDocument() != null) {
+                        Long docId = lock.getDocument().getId();
+                        log.debug("✅ document 정보 로드 완료: documentId={}", docId);
+                    } else {
+                        log.warn("⚠️ document가 null입니다: lockId={}", lock.getId());
+                    }
+                } catch (Exception e) {
+                    log.error("❌ LAZY 로딩 중 오류 발생: documentId={}", documentId, e);
+                    // LAZY 로딩 실패해도 락은 반환 (부분 정보라도 제공)
+                }
+            } else {
+                log.debug("ℹ️ 락이 없습니다: documentId={}", documentId);
+            }
+            
+            return lockOpt;
+        } catch (Exception e) {
+            log.error("❌ 락 상태 조회 중 오류 발생: documentId={}", documentId, e);
+            return Optional.empty(); // 에러 발생 시 빈 Optional 반환
+        }
     }
 
     @Transactional(readOnly = true)
