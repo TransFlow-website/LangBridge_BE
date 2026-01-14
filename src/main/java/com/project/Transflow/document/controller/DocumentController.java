@@ -53,10 +53,18 @@ public class DocumentController {
         Long createdById = null;
         if (authHeader != null && !authHeader.isEmpty()) {
             // 권한 체크 (관리자 이상) - 헤더가 있을 때만
+            Integer roleLevel = adminAuthUtil.getRoleLevelFromToken(authHeader);
+            log.info("문서 생성 요청 - roleLevel: {}, authHeader: {}", roleLevel, authHeader != null ? "present" : "null");
+            
             if (!adminAuthUtil.isAdminOrAbove(authHeader)) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+                log.warn("권한 없음 - roleLevel: {}", roleLevel);
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(null);
             }
             createdById = adminAuthUtil.getUserIdFromToken(authHeader);
+            log.info("문서 생성 승인 - userId: {}, roleLevel: {}", createdById, roleLevel);
+        } else {
+            log.warn("Authorization 헤더가 없습니다. 기본 사용자로 진행합니다.");
         }
         // 헤더가 없으면 createdById는 null로 전달 (서비스에서 처리)
 

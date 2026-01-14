@@ -36,9 +36,18 @@ public class OAuth2LoginSuccessHandler extends SimpleUrlAuthenticationSuccessHan
         String email = (String) attributes.get("email");
         log.info("OAuth2 로그인 성공: {}", email);
         
+        // 프론트엔드 URL 가져오기 (환경 변수 또는 기본값 사용)
+        String frontendUrl = System.getenv("FRONTEND_URL");
+        if (frontendUrl == null || frontendUrl.isEmpty()) {
+            frontendUrl = "http://localhost:3000";
+        }
+        
         if (email == null) {
             log.error("이메일 정보가 없습니다.");
-            getRedirectStrategy().sendRedirect(request, response, "/api/auth/login/failure?error=no_email");
+            String failureUrl = UriComponentsBuilder.fromUriString(frontendUrl)
+                    .queryParam("error", "no_email")
+                    .build().toUriString();
+            getRedirectStrategy().sendRedirect(request, response, failureUrl);
             return;
         }
         
@@ -46,20 +55,24 @@ public class OAuth2LoginSuccessHandler extends SimpleUrlAuthenticationSuccessHan
         
         if (userOpt.isEmpty()) {
             log.error("사용자를 찾을 수 없습니다: {}", email);
-            getRedirectStrategy().sendRedirect(request, response, "/api/auth/login/failure?error=user_not_found");
+            String failureUrl = UriComponentsBuilder.fromUriString(frontendUrl)
+                    .queryParam("error", "user_not_found")
+                    .build().toUriString();
+            getRedirectStrategy().sendRedirect(request, response, failureUrl);
             return;
         }
         
         User user = userOpt.get();
         String token = jwtUtil.generateToken(user.getEmail(), user.getId(), user.getRoleLevel());
         
-        // JWT 토큰을 쿼리 파라미터로 전달
-        String targetUrl = UriComponentsBuilder.fromUriString("/api/auth/login/success")
+        // JWT 토큰을 쿼리 파라미터로 전달하여 프론트엔드로 리다이렉트
+        String targetUrl = UriComponentsBuilder.fromUriString(frontendUrl)
                 .queryParam("token", token)
                 .queryParam("email", email)
                 .build().toUriString();
         
         log.info("로그인 성공, 토큰 생성 완료: {} (role_level: {})", email, user.getRoleLevel());
+        log.info("프론트엔드로 리다이렉트: {}", targetUrl);
         getRedirectStrategy().sendRedirect(request, response, targetUrl);
     }
 }
