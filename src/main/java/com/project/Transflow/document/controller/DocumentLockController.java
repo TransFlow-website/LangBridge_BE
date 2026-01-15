@@ -1,8 +1,12 @@
 package com.project.Transflow.document.controller;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.project.Transflow.admin.util.AdminAuthUtil;
 import com.project.Transflow.document.dto.*;
 import com.project.Transflow.document.entity.DocumentLock;
+import com.project.Transflow.document.repository.DocumentLockRepository;
 import com.project.Transflow.document.service.DocumentLockService;
 import com.project.Transflow.document.service.DocumentService;
 import com.project.Transflow.document.service.DocumentVersionService;
@@ -19,6 +23,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import javax.validation.Valid;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
@@ -32,6 +38,8 @@ public class DocumentLockController {
     private final DocumentService documentService;
     private final DocumentVersionService versionService;
     private final AdminAuthUtil adminAuthUtil;
+    private final ObjectMapper objectMapper;
+    private final DocumentLockRepository lockRepository;
 
     @Operation(
             summary = "문서 락 획득",
@@ -123,6 +131,20 @@ public class DocumentLockController {
             // userId가 null이면 편집 불가로 처리
             boolean canEdit = userId != null && lock.getLockedBy().getId().equals(userId);
 
+            // completedParagraphs JSON 파싱
+            List<Integer> completedParagraphs = new ArrayList<>();
+            if (lock.getCompletedParagraphs() != null && !lock.getCompletedParagraphs().isEmpty()) {
+                try {
+                    completedParagraphs = objectMapper.readValue(
+                            lock.getCompletedParagraphs(),
+                            new TypeReference<List<Integer>>() {}
+                    );
+                } catch (JsonProcessingException e) {
+                    log.warn("완료된 문단 목록 JSON 파싱 실패: documentId={}", documentId, e);
+                    completedParagraphs = new ArrayList<>();
+                }
+            }
+
             LockStatusResponse response = LockStatusResponse.builder()
                     .locked(true)
                     .lockedBy(LockStatusResponse.LockedByInfo.builder()
@@ -132,6 +154,7 @@ public class DocumentLockController {
                             .build())
                     .lockedAt(lock.getLockedAt())
                     .canEdit(canEdit)
+                    .completedParagraphs(completedParagraphs)
                     .build();
 
             return ResponseEntity.ok(response);
@@ -294,6 +317,25 @@ public class DocumentLockController {
         versionRequest.setIsFinal(false);
         versionService.createVersion(documentId, versionRequest, userId);
 
+        // completedParagraphs를 락에 저장 (락 해제 전에 저장)
+        var lockOpt = lockService.getLockStatus(documentId);
+        if (lockOpt.isPresent()) {
+            DocumentLock lock = lockOpt.get();
+            try {
+                // completedParagraphs를 JSON 문자열로 변환하여 저장
+                String completedParagraphsJson = null;
+                if (request.getCompletedParagraphs() != null && !request.getCompletedParagraphs().isEmpty()) {
+                    completedParagraphsJson = objectMapper.writeValueAsString(request.getCompletedParagraphs());
+                }
+                lock.setCompletedParagraphs(completedParagraphsJson);
+                lockRepository.save(lock);
+                log.info("✅ 번역 완료 시 completedParagraphs 저장: documentId={}, completedParagraphs={}", 
+                        documentId, request.getCompletedParagraphs() != null ? request.getCompletedParagraphs().size() : 0);
+            } catch (JsonProcessingException e) {
+                log.error("completedParagraphs JSON 변환 실패: documentId={}", documentId, e);
+            }
+        }
+
         // 락 해제
         lockService.releaseLock(documentId, userId);
 
@@ -321,6 +363,27 @@ public class DocumentLockController {
 
         // 임시 저장은 사용자 인증 없이도 가능 (개발 단계)
         // TODO: 임시 저장 버전 관리 로직 추가
+
+        // completedParagraphs를 락에 저장
+        var lockOpt = lockService.getLockStatus(documentId);
+        if (lockOpt.isPresent()) {
+            DocumentLock lock = lockOpt.get();
+            try {
+                // completedParagraphs를 JSON 문자열로 변환하여 저장
+                String completedParagraphsJson = null;
+                if (request.getCompletedParagraphs() != null && !request.getCompletedParagraphs().isEmpty()) {
+                    completedParagraphsJson = objectMapper.writeValueAsString(request.getCompletedParagraphs());
+                }
+                lock.setCompletedParagraphs(completedParagraphsJson);
+                lockRepository.save(lock);
+                log.info("✅ 임시 저장 완료: documentId={}, completedParagraphs={}", 
+                        documentId, request.getCompletedParagraphs() != null ? request.getCompletedParagraphs().size() : 0);
+            } catch (JsonProcessingException e) {
+                log.error("completedParagraphs JSON 변환 실패: documentId={}", documentId, e);
+            }
+        } else {
+            log.warn("⚠️ 락이 없어서 completedParagraphs를 저장할 수 없습니다: documentId={}", documentId);
+        }
 
         return ResponseEntity.ok(Map.of("success", true, "message", "임시 저장되었습니다."));
     }

@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Getter
 @Setter
@@ -28,6 +29,9 @@ public class LockStatusResponse {
 
     @Schema(description = "편집 가능 여부", example = "true")
     private Boolean canEdit;
+
+    @Schema(description = "완료된 문단 인덱스 목록", example = "[0, 1, 2]")
+    private List<Integer> completedParagraphs;
 
     @Getter
     @Setter
