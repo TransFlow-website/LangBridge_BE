@@ -15,3 +15,4 @@ public interface DocumentFavoriteRepository extends JpaRepository<DocumentFavori
     void deleteByUserIdAndDocumentId(Long userId, Long documentId);
 }
 
+
